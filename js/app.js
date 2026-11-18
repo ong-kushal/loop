@@ -13,6 +13,7 @@
   let db = null;
   let currentUser = null;
   let myProfile = null;
+  let myLocation = {city:'', region:''};
   let realtimeChannels = [];
   let activeVideoView = null;
   let photoViewTimer = null;
@@ -102,10 +103,14 @@
     if (error && error.message !== 'Auth session missing!') console.warn(error.message);
     currentUser = data?.user || null;
     myProfile = null;
+    myLocation = {city:'', region:''};
     if (currentUser) {
       const {data: profile, error: profileError} = await db.from('profiles').select('*').eq('id', currentUser.id).maybeSingle();
       if (profileError) console.warn(profileError.message);
       myProfile = profile;
+      const {data: privateLocation, error: locationError} = await db.from('profile_locations').select('city,region').eq('user_id', currentUser.id).maybeSingle();
+      if (locationError) console.warn('Private location could not be loaded:', locationError.message);
+      myLocation = privateLocation || {city:profile?.city || '', region:profile?.region || ''};
     }
     updateUserNav();
     await updateBadges();
@@ -170,6 +175,117 @@
     return false;
   }
 
+  function needsLocationSetup() {
+    if (!currentUser || !myProfile) return false;
+    const hasLocation = Boolean(String(myLocation.city || '').trim() || String(myLocation.region || '').trim());
+    return !hasLocation && myProfile.location_prompt_completed !== true;
+  }
+
+  function renderLocationSetup() {
+    if (!currentUser) { location.hash = '#/login'; return; }
+    view.innerHTML = `
+      <section class="auth-shell location-onboarding">
+        <span class="eyebrow">MAKE YOUR FEED FEEL LOCAL</span>
+        <h1>Where are you<br><em>based?</em></h1>
+        <p>Adding your city and region helps Loop recommend posts from places near you, alongside topics you care about.</p>
+        <div class="location-detect-card">
+          <div class="location-detect-icon">⌖</div>
+          <div class="location-detect-copy"><b>Find my city automatically</b><small>Your browser will ask permission to use your current location.</small></div>
+          <button class="button button-dark button-small" type="button" data-action="detect-location">Use my location</button>
+        </div>
+        <p id="location-status" class="location-status" role="status" aria-live="polite">You can review the result before saving, or enter your location yourself below.</p>
+        <form id="location-form" class="form-stack">
+          <div class="form-row">
+            <div class="field"><label for="location-city">City / town</label><input id="location-city" maxlength="60" value="${esc(myLocation.city || '')}" placeholder="e.g. Kathmandu"></div>
+            <div class="field"><label for="location-region">Region / province</label><input id="location-region" maxlength="60" value="${esc(myLocation.region || '')}" placeholder="e.g. Bagmati"></div>
+          </div>
+          <button class="button button-primary button-full" type="submit">Save location and continue ↗</button>
+        </form>
+        <button class="location-skip" type="button" data-action="skip-location">Skip for now</button>
+        <p class="location-privacy">Privacy: Loop stores only the city and region you confirm, never your GPS coordinates. Automatic detection sends your current coordinates from this browser to <a href="https://www.bigdatacloud.com/" target="_blank" rel="noreferrer">BigDataCloud</a> for conversion; the service may also receive your request IP address. You can enter a location manually or skip this step.</p>
+      </section>`;
+  }
+
+  async function detectAndFillLocation(button) {
+    const status = $('#location-status');
+    if (!navigator.geolocation) {
+      if (status) status.textContent = 'Location detection is not available in this browser. Enter your city and region manually instead.';
+      return;
+    }
+    const originalText = button.textContent;
+    button.disabled = true;
+    button.textContent = 'Finding…';
+    if (status) status.textContent = 'Waiting for browser permission, then finding your city and region…';
+    try {
+      const position = await new Promise((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: false,
+          timeout: 15000,
+          maximumAge: 0
+        });
+      });
+      const params = new URLSearchParams({
+        latitude: String(position.coords.latitude),
+        longitude: String(position.coords.longitude),
+        localityLanguage: 'en'
+      });
+      const response = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?${params.toString()}`, {
+        method: 'GET',
+        headers: {Accept: 'application/json'}
+      });
+      if (!response.ok) throw new Error('The location service could not find your city. Please enter it manually.');
+      const result = await response.json();
+      const city = String(result.city || result.locality || '').trim().slice(0, 60);
+      const region = String(result.principalSubdivision || '').trim().slice(0, 60);
+      if (!city && !region) throw new Error('A city or region could not be detected. Please enter your location manually.');
+      $('#location-city').value = city;
+      $('#location-region').value = region;
+      if (status) status.textContent = `Found ${[city, region].filter(Boolean).join(', ')}. Check the fields and save to continue.`;
+    } catch (error) {
+      const message = error?.code === 1
+        ? 'Location permission was denied. You can enter your city and region manually.'
+        : error?.code === 2
+          ? 'Your location is unavailable right now. Try again or enter it manually.'
+          : error?.code === 3
+            ? 'Location lookup timed out. Try again or enter it manually.'
+            : (error?.message || 'Could not detect your location. Enter it manually.');
+      if (status) status.textContent = message;
+    } finally {
+      if (button.isConnected) {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    }
+  }
+
+  async function finishLocationSetup(city = '', region = '') {
+    const cleanCity = String(city).trim().slice(0, 60);
+    const cleanRegion = String(region).trim().slice(0, 60);
+    if (cleanCity || cleanRegion) {
+      const {error:locationError} = await db.from('profile_locations').upsert({
+        user_id:currentUser.id, city:cleanCity, region:cleanRegion
+      }, {onConflict:'user_id'});
+      if (locationError) throw locationError;
+    }
+    const profilePatch = {location_prompt_completed:true};
+    if (cleanCity || cleanRegion) {
+      profilePatch.city = myProfile?.show_location ? cleanCity : '';
+      profilePatch.region = myProfile?.show_location ? cleanRegion : '';
+    }
+    const {error} = await db.from('profiles').update(profilePatch).eq('id', currentUser.id);
+    if (error) throw error;
+    await refreshUser();
+    toast(cleanCity || cleanRegion ? 'Your location has been saved.' : 'No problem. You can add a location anytime in Edit profile.', 'success');
+    location.hash = '#/feed';
+  }
+
+  async function saveLocationSetup() {
+    const city = $('#location-city').value.trim();
+    const region = $('#location-region').value.trim();
+    if (!city && !region) throw new Error('Enter at least a city or region, or choose Skip for now.');
+    await finishLocationSetup(city, region);
+  }
+
   function renderMedia(post, detail = false) {
     const src = publicUrl('loop-posts', post.media_path);
     if (post.media_type === 'video') {
@@ -194,7 +310,7 @@
     const author = post.author || {};
     const isOwn = currentUser && post.user_id === currentUser.id;
     const saved = savedIds.has(post.id);
-    const location = [post.location_city, post.location_region].filter(Boolean).join(', ');
+    const location = author.show_location ? [author.city, author.region].filter(Boolean).join(', ') : '';
     const tags = (post.tags || []).map(tag => `<span>#${esc(tag)}</span>`).join('');
     return `<article class="post-card" data-post-card="${esc(post.id)}">
       <div class="post-topline">
@@ -233,20 +349,22 @@
   // re-order the ranked list to avoid showing the same topic repeatedly.
   async function getFeedPosts() {
     const {data, error} = await db.from('posts')
-      .select('*, author:profiles!posts_user_id_fkey(id, username, display_name, bio, avatar_path, city, region)')
+      .select('*, author:profiles!posts_user_id_fkey(id, username, display_name, bio, avatar_path, city, region, show_location)')
       .order('created_at', {ascending:false}).limit(120);
     if (error) throw error;
     const posts = data || [];
     if (!currentUser || !posts.length) return posts;
 
-    const [bookmarks, comments, views] = await Promise.all([
+    const [bookmarks, comments, views, locationMatches] = await Promise.all([
       db.from('bookmarks').select('post_id,created_at').eq('user_id', currentUser.id).order('created_at',{ascending:false}).limit(300),
       db.from('comments').select('post_id,created_at').eq('user_id', currentUser.id).order('created_at',{ascending:false}).limit(300),
-      db.from('post_views').select('post_id,created_at').eq('viewer_id', currentUser.id).order('created_at',{ascending:false}).limit(400)
+      db.from('post_views').select('post_id,created_at').eq('viewer_id', currentUser.id).order('created_at',{ascending:false}).limit(400),
+      db.rpc('get_my_location_matches', {p_post_ids:posts.map(post => post.id)})
     ]);
-    for (const result of [bookmarks, comments, views]) {
+    for (const result of [bookmarks, comments, views, locationMatches]) {
       if (result.error) throw result.error;
     }
+    const localSignalMap = new Map((locationMatches.data || []).map(row => [row.post_id, row]));
 
     const bookmarkIds = new Set((bookmarks.data || []).map(row => row.post_id));
     const commentIds = new Set((comments.data || []).map(row => row.post_id));
@@ -272,8 +390,6 @@
       });
     }
 
-    const city = String(myProfile?.city || '').toLowerCase().trim();
-    const region = String(myProfile?.region || '').toLowerCase().trim();
     const now = Date.now();
     const scored = posts.map(post => {
       const ageHours = Math.max(0, (now - new Date(post.created_at).getTime()) / 3600000);
@@ -281,8 +397,9 @@
       const tagScores = tags.map(tag => ({tag, score: Math.min(8, Math.log2(1 + (interestCounts.get(tag) || 0)) * 2.7)}))
         .sort((a,b) => b.score - a.score);
       const interestScore = Math.min(18, tagScores.slice(0, 3).reduce((sum, item) => sum + item.score, 0));
-      const cityMatch = city && String(post.location_city || '').toLowerCase().trim() === city;
-      const regionMatch = region && String(post.location_region || '').toLowerCase().trim() === region;
+      const localSignal = localSignalMap.get(post.id);
+      const cityMatch = Boolean(localSignal?.city_match);
+      const regionMatch = Boolean(localSignal?.region_match);
       // A smooth 36-hour decay keeps new posts visible without immediately
       // burying older posts that strongly match someone's interests.
       const freshnessScore = 24 * Math.exp(-ageHours / 36);
@@ -358,7 +475,7 @@
       const ids = (saved || []).map(row => row.post_id);
       let posts = [];
       if (ids.length) {
-        const result = await db.from('posts').select('*, author:profiles!posts_user_id_fkey(id, username, display_name, bio, avatar_path, city, region)').in('id', ids);
+        const result = await db.from('posts').select('*, author:profiles!posts_user_id_fkey(id, username, display_name, bio, avatar_path, city, region, show_location)').in('id', ids);
         if (result.error) throw result.error;
         const map = new Map((result.data || []).map(post => [post.id, post]));
         posts = ids.map(id => map.get(id)).filter(Boolean);
@@ -374,7 +491,7 @@
     if (photoViewTimer) clearTimeout(photoViewTimer);
     activeVideoView = null;
     try {
-      const {data: post, error} = await db.from('posts').select('*, author:profiles!posts_user_id_fkey(id, username, display_name, bio, avatar_path, city, region)').eq('id', postId).maybeSingle();
+      const {data: post, error} = await db.from('posts').select('*, author:profiles!posts_user_id_fkey(id, username, display_name, bio, avatar_path, city, region, show_location)').eq('id', postId).maybeSingle();
       if (error) throw error;
       if (!post) { showError('This post may have been deleted.', false); return; }
       const [savedIds, commentsResult] = await Promise.all([
@@ -647,7 +764,7 @@
       ]);
       if (postsResult.error) throw postsResult.error;
       const posts = postsResult.data || [];
-      const location = [profile.city,profile.region].filter(Boolean).join(', ');
+      const location = profile.show_location ? [profile.city,profile.region].filter(Boolean).join(', ') : '';
       const avatar = profile.avatar_path ? publicUrl('loop-avatars',profile.avatar_path) : '';
       const grid = posts.map(post => `<a class="profile-grid-item" href="#/post/${post.id}">${post.media_type === 'video' ? `<video src="${esc(publicUrl('loop-posts',post.media_path))}" muted preload="metadata"></video><span>▶</span>` : `<img src="${esc(publicUrl('loop-posts',post.media_path))}" alt="" loading="lazy">`}<span>◉ ${Number(post.views_count||0).toLocaleString()}</span></a>`).join('');
       view.innerHTML = `<section><header class="profile-hero">${avatar ? `<img class="profile-avatar" src="${esc(avatar)}" alt="">` : `<span class="profile-avatar avatar-fallback">${initials(profile.display_name)}</span>`}<div class="profile-info"><h1>${esc(profile.display_name)}</h1><span class="handle">@${esc(profile.username)}</span><p>${esc(profile.bio || 'A little corner of Loop.')}</p><div class="profile-meta"><span>${posts.length} posts</span>${location ? `<span>⌖ ${esc(location)}</span>` : ''}</div><div class="profile-actions">${own ? '<button class="button button-primary button-small" data-action="edit-profile">Edit profile</button>' : currentUser ? `<a class="button button-dark button-small" href="#/dm/${profile.id}">Message ↗</a>` : '<a class="button button-dark button-small" href="#/login">Sign in to message</a>'}</div></div></header><div class="profile-grid">${grid || emptyState('✳',own ? 'Your story starts here.' : 'No posts yet.','When this person shares something, it will appear here.',own ? '<a class="button button-primary" href="#/upload">Create a post</a>' : '')}</div></section>`;
@@ -658,12 +775,12 @@
     if (!requireAuth()) return;
     if (!myProfile) { await refreshUser(); }
     const avatar = myProfile?.avatar_path ? publicUrl('loop-avatars',myProfile.avatar_path) : '';
-    view.innerHTML = `<section class="auth-shell"><span class="eyebrow">YOUR CORNER OF LOOP</span><h1>Edit profile.</h1><p>Keep it simple. You can change these details anytime.</p><form id="profile-form" class="form-stack"><div class="field"><label>Profile picture</label>${avatar ? `<img src="${esc(avatar)}" class="profile-avatar" alt="Current profile picture">` : ''}<label class="file-pick">Choose photo<input id="avatar-file" type="file" accept="image/jpeg,image/png,image/webp"></label><small>JPG, PNG or WebP · up to 4 MB</small></div><div class="field"><label for="profile-display">Display name</label><input id="profile-display" maxlength="40" required value="${esc(myProfile?.display_name || '')}"></div><div class="field"><label for="profile-username">Username</label><input id="profile-username" value="${esc(myProfile?.username || '')}" disabled><small>Username changes are not enabled in this starter release.</small></div><div class="field"><label for="profile-bio">Bio</label><textarea id="profile-bio" maxlength="160">${esc(myProfile?.bio || '')}</textarea></div><div class="form-row"><div class="field"><label for="profile-city">City</label><input id="profile-city" maxlength="60" value="${esc(myProfile?.city || '')}" placeholder="e.g. Kathmandu"></div><div class="field"><label for="profile-region">Region / province</label><input id="profile-region" maxlength="60" value="${esc(myProfile?.region || '')}" placeholder="e.g. Bagmati"></div></div><small class="form-help">Location is entered manually. Loop does not collect precise GPS location.</small><button class="button button-primary button-full" type="submit">Save profile</button></form></section>`;
+    view.innerHTML = `<section class="auth-shell"><span class="eyebrow">YOUR CORNER OF LOOP</span><h1>Edit profile.</h1><p>Keep it simple. You can change these details anytime.</p><form id="profile-form" class="form-stack"><div class="field"><label>Profile picture</label>${avatar ? `<img src="${esc(avatar)}" class="profile-avatar" alt="Current profile picture">` : ''}<label class="file-pick">Choose photo<input id="avatar-file" type="file" accept="image/jpeg,image/png,image/webp"></label><small>JPG, PNG or WebP · up to 4 MB</small></div><div class="field"><label for="profile-display">Display name</label><input id="profile-display" maxlength="40" required value="${esc(myProfile?.display_name || '')}"></div><div class="field"><label for="profile-username">Username</label><input id="profile-username" value="${esc(myProfile?.username || '')}" disabled><small>Username changes are not enabled in this starter release.</small></div><div class="field"><label for="profile-bio">Bio</label><textarea id="profile-bio" maxlength="160">${esc(myProfile?.bio || '')}</textarea></div><div class="form-row"><div class="field"><label for="profile-city">City</label><input id="profile-city" maxlength="60" value="${esc(myLocation.city || '')}" placeholder="e.g. Kathmandu"></div><div class="field"><label for="profile-region">Region / province</label><input id="profile-region" maxlength="60" value="${esc(myLocation.region || '')}" placeholder="e.g. Bagmati"></div></div><small class="form-help">Used for local recommendations. Your city and region are kept in private location records and used for feed recommendations. They appear publicly only when you enable the option below.</small><label class="location-public-toggle"><input id="profile-show-location" type="checkbox" ${myProfile?.show_location ? 'checked' : ''}><span>Show my city and region on my public profile</span></label><button class="button button-primary button-full" type="submit">Save profile</button></form></section>`;
   }
 
   async function renderUpload() {
     if (!requireAuth()) return;
-    view.innerHTML = `<section class="upload-card"><header class="page-heading"><span class="eyebrow">SHARE A MOMENT</span><h1>Create a <em>post.</em></h1><p>Photos up to 10 MB. Videos up to 50 MB and 60 seconds.</p></header><form id="upload-form" class="form-stack"><div class="field"><label>Choose a photo or video</label><div id="upload-preview" class="upload-preview"><div class="placeholder"><span>＋</span>Choose media to preview it here</div></div><label class="file-pick">Choose photo or video<input id="post-file" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime,video/x-m4v" required></label><small id="file-help">Images: JPG, PNG, WebP or GIF · Videos: MP4, MOV or M4V · maximum 60 seconds</small></div><div class="field"><label for="post-caption">Caption</label><textarea id="post-caption" maxlength="500" placeholder="What would you like to share? (500 characters max)"></textarea></div><div class="form-row"><div class="field"><label for="post-city">City</label><input id="post-city" maxlength="60" value="${esc(myProfile?.city || '')}" placeholder="City"></div><div class="field"><label for="post-region">Region / province</label><input id="post-region" maxlength="60" value="${esc(myProfile?.region || '')}" placeholder="Region"></div></div><small class="form-help">These optional location labels help people nearby discover relevant posts.</small><button class="button button-primary button-full" type="submit">Share with Loop ↗</button></form></section>`;
+    view.innerHTML = `<section class="upload-card"><header class="page-heading"><span class="eyebrow">SHARE A MOMENT</span><h1>Create a <em>post.</em></h1><p>Photos up to 10 MB. Videos up to 50 MB and 60 seconds.</p></header><form id="upload-form" class="form-stack"><div class="field"><label>Choose a photo or video</label><div id="upload-preview" class="upload-preview"><div class="placeholder"><span>＋</span>Choose media to preview it here</div></div><label class="file-pick">Choose photo or video<input id="post-file" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime,video/x-m4v" required></label><small id="file-help">Images: JPG, PNG, WebP or GIF · Videos: MP4, MOV or M4V · maximum 60 seconds</small></div><div class="field"><label for="post-caption">Caption</label><textarea id="post-caption" maxlength="500" placeholder="What would you like to share? (500 characters max)"></textarea></div><div class="form-row"><div class="field"><label for="post-city">City</label><input id="post-city" maxlength="60" value="${esc(myLocation.city || '')}" placeholder="City"></div><div class="field"><label for="post-region">Region / province</label><input id="post-region" maxlength="60" value="${esc(myLocation.region || '')}" placeholder="Region"></div></div><small class="form-help">These labels help personalize the local feed. They stay private unless you choose to show your location on your profile.</small><button class="button button-primary button-full" type="submit">Share with Loop ↗</button></form></section>`;
     $('#post-file')?.addEventListener('change', previewUpload);
   }
 
@@ -763,15 +880,25 @@
     if (uploadError) throw uploadError;
     const caption = $('#post-caption').value.trim();
     const tags = [...new Set((caption.match(/#[\p{L}\p{N}_]+/gu) || []).map(tag => tag.slice(1).toLowerCase()))].slice(0,12);
+    const city = $('#post-city').value.trim().slice(0, 60);
+    const region = $('#post-region').value.trim().slice(0, 60);
     const row = {
       user_id:currentUser.id, caption, media_path:path, media_type:type,
       duration_seconds:duration ? Number(duration.toFixed(2)) : null,
-      tags, location_city:$('#post-city').value.trim(), location_region:$('#post-region').value.trim()
+      tags, location_city:'', location_region:''
     };
-    const {error:insertError} = await db.from('posts').insert(row);
+    const {data:createdPost, error:insertError} = await db.from('posts').insert(row).select('id').single();
     if (insertError) {
       await db.storage.from('loop-posts').remove([path]);
       throw insertError;
+    }
+    const {error:localityError} = await db.from('post_locations').upsert({
+      post_id:createdPost.id, user_id:currentUser.id, city, region
+    }, {onConflict:'post_id'});
+    if (localityError) {
+      await db.from('posts').delete().eq('id', createdPost.id);
+      await db.storage.from('loop-posts').remove([path]);
+      throw localityError;
     }
     toast('Your post is now on Loop.', 'success');
     validatedUpload = null;
@@ -793,7 +920,18 @@
     const city = $('#profile-city').value.trim();
     const region = $('#profile-region').value.trim();
     if (!display_name) throw new Error('Add a display name.');
-    const patch = {display_name,bio,city,region};
+    const showLocation = $('#profile-show-location')?.checked || false;
+    const patch = {
+      display_name, bio,
+      city:showLocation ? city : '',
+      region:showLocation ? region : '',
+      show_location:showLocation,
+      location_prompt_completed:true
+    };
+    const {error:privateLocationError} = await db.from('profile_locations').upsert({
+      user_id:currentUser.id, city, region
+    }, {onConflict:'user_id'});
+    if (privateLocationError) throw privateLocationError;
     const file = $('#avatar-file').files?.[0];
     if (file) {
       if (!file.type.startsWith('image/') || file.size > 4*1024*1024) throw new Error('Profile photos must be an image up to 4 MB.');
@@ -831,15 +969,15 @@
     const cleanTerm = term.replace(/[^a-zA-Z0-9_. -]/g, '').trim();
     if (cleanTerm.length < 2) { results.innerHTML = '<p class="form-help">Type at least two characters to search.</p>'; return; }
     const [byUsername, byName] = await Promise.all([
-      db.from('profiles').select('id,username,display_name,bio,avatar_path,city,region').ilike('username', `%${cleanTerm}%`).limit(20),
-      db.from('profiles').select('id,username,display_name,bio,avatar_path,city,region').ilike('display_name', `%${cleanTerm}%`).limit(20)
+      db.from('profiles').select('id,username,display_name,bio,avatar_path,city,region,show_location').ilike('username', `%${cleanTerm}%`).limit(20),
+      db.from('profiles').select('id,username,display_name,bio,avatar_path,city,region,show_location').ilike('display_name', `%${cleanTerm}%`).limit(20)
     ]);
     const error = byUsername.error || byName.error;
     if (error) { results.innerHTML = `<p class="form-help">${esc(error.message)}</p>`; return; }
     const data = [...(byUsername.data || []), ...(byName.data || [])];
     const unique = new Map(data.map(profile => [profile.id,profile]));
     const filtered = [...unique.values()].filter(profile => profile.id !== currentUser?.id);
-    results.innerHTML = filtered.length ? filtered.map(profile => `<a class="conversation-item" href="${authorLink(profile)}">${avatarHtml(profile,'notification-avatar')}<span class="conversation-copy"><b>${esc(profile.display_name)}</b><small>@${esc(profile.username)} · ${esc([profile.city,profile.region].filter(Boolean).join(', '))}</small></span><span class="text-link">View →</span></a>`).join('') : '<p class="form-help">No users found.</p>';
+    results.innerHTML = filtered.length ? filtered.map(profile => `<a class="conversation-item" href="${authorLink(profile)}">${avatarHtml(profile,'notification-avatar')}<span class="conversation-copy"><b>${esc(profile.display_name)}</b><small>@${esc(profile.username)}${profile.show_location && [profile.city,profile.region].filter(Boolean).length ? ` · ${esc([profile.city,profile.region].filter(Boolean).join(', '))}` : ''}</small></span><span class="text-link">View →</span></a>`).join('') : '<p class="form-help">No users found.</p>';
   }
 
   async function renderDiscover() {
@@ -879,7 +1017,7 @@
       if (data.session) {
         await refreshUser();
         toast('Welcome to Loop.', 'success');
-        location.hash = '#/feed';
+        location.hash = needsLocationSetup() ? '#/location-setup' : '#/feed';
       } else {
         toast('Check your email to confirm your account, then sign in.', 'success');
         location.hash = '#/login';
@@ -889,7 +1027,7 @@
       if (error) throw error;
       await refreshUser();
       toast('Welcome back.', 'success');
-      location.hash = '#/feed';
+      location.hash = needsLocationSetup() ? '#/location-setup' : '#/feed';
     }
   }
 
@@ -899,6 +1037,7 @@
     if (error) throw error;
     currentUser = null;
     myProfile = null;
+    myLocation = {city:'', region:''};
     activeChatPeer = null;
     updateUserNav();
     await updateBadges();
@@ -927,6 +1066,7 @@
     if (route === 'edit-profile') return renderEditProfile();
     if (route === 'discover') return renderDiscover();
     if (route === 'login' || route === 'register') return renderAuth(route);
+    if (route === 'location-setup') return currentUser ? renderLocationSetup() : renderAuth('login');
     return renderFeed();
   }
 
@@ -960,6 +1100,8 @@
         else if (action === 'edit-profile') { location.hash = '#/edit-profile'; }
         else if (action === 'mark-all-read') { await markAllNotificationsRead(); }
         else if (action === 'reload') { render(); }
+        else if (action === 'detect-location') { await detectAndFillLocation(actionElement); }
+        else if (action === 'skip-location') { await finishLocationSetup(); }
       } catch (error) { handleError(error); }
     }
     const notificationLink = event.target.closest('[data-notification]');
@@ -973,6 +1115,7 @@
     if (submitButton) { submitButton.disabled = true; submitButton.dataset.originalText = submitButton.textContent; submitButton.textContent = 'Please wait…'; }
     try {
       if (form.id === 'auth-form') await submitAuth(location.hash.includes('register') ? 'register' : 'login');
+      else if (form.id === 'location-form') await saveLocationSetup();
       else if (form.id === 'upload-form') await uploadPost();
       else if (form.id === 'profile-form') await saveProfile();
       else if (form.id === 'comment-form') {
@@ -1015,12 +1158,18 @@
     if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'SIGNED_OUT') {
       currentUser = session?.user || null;
       // Avoid awaiting Supabase calls in the auth callback; refresh after this event turn.
-      setTimeout(async () => { await refreshUser(); if (!location.hash) location.hash = '#/feed'; else render(); }, 0);
+      setTimeout(async () => {
+        await refreshUser();
+        if (event === 'SIGNED_IN' && needsLocationSetup() && location.hash !== '#/location-setup') location.hash = '#/location-setup';
+        else if (!location.hash) location.hash = '#/feed';
+        else render();
+      }, 0);
     }
   });
 
   (async () => {
     await refreshUser();
-    await render();
+    if (needsLocationSetup() && (!location.hash || location.hash === '#/feed')) location.hash = '#/location-setup';
+    else await render();
   })();
 })();

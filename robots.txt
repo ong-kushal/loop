@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: __LOOP_SITE_URL__sitemap.xml
+Sitemap: https://ong-kushal.github.io/loop/sitemap.xml

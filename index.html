@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f7f2">
+  <meta name="description" content="Loop — a quieter social space. Share moments, discover ideas, and have meaningful conversations.">
+  <title>Loop — A quieter social space</title>
+  <link rel="icon" type="image/svg+xml" href="assets/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="js/config.js"></script>
+  <script src="js/app.js" defer></script>
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#/feed" aria-label="Loop home"><span class="brand-mark">l</span><span>loop<span class="brand-dot">.</span></span></a>
+      <nav id="main-nav" class="top-nav" aria-label="Main navigation">
+        <a class="nav-link" href="#/feed"><span>⌂</span><span>For You</span></a>
+        <a class="nav-link" href="#/saved"><span>◇</span><span>Saved</span></a>
+        <a class="nav-link" href="#/notifications"><span>♧</span><span>Alerts</span><b id="notification-count" class="nav-count hidden">0</b></a>
+        <a class="nav-link" href="#/messages"><span>✉</span><span>Inbox</span><b id="message-count" class="nav-count hidden">0</b></a>
+      </nav>
+      <div class="user-nav" id="user-nav"><a class="button button-dark button-small" href="#/login">Sign in</a></div>
+    </header>
+    <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+    <main id="view" class="page-shell" tabindex="-1">
+      <section class="loading-state"><div class="loader"></div><p>Opening Loop…</p></section>
+    </main>
+    <footer class="site-footer"><span>LOOP · A QUIETER SOCIAL SPACE</span><span>Made for moments, not metrics.</span></footer>
+  </div>
+  <dialog id="confirm-dialog" class="confirm-dialog">
+    <form method="dialog" class="confirm-content">
+      <span class="eyebrow">ONE LAST CHECK</span>
+      <h2 id="confirm-title">Delete this post?</h2>
+      <p id="confirm-message">This action cannot be undone.</p>
+      <div class="dialog-actions"><button class="button button-outline" value="cancel">Cancel</button><button id="confirm-accept" class="button button-danger" value="confirm">Delete post</button></div>
+    </form>
+  </dialog>
+</body>
+</html>

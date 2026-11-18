@@ -229,42 +229,105 @@
     return new Set((data || []).map(row => row.post_id));
   }
 
+  // Rank recent posts using location and the viewer's past activity, then
+  // re-order the ranked list to avoid showing the same topic repeatedly.
   async function getFeedPosts() {
     const {data, error} = await db.from('posts')
       .select('*, author:profiles!posts_user_id_fkey(id, username, display_name, bio, avatar_path, city, region)')
-      .order('created_at', {ascending:false}).limit(100);
+      .order('created_at', {ascending:false}).limit(120);
     if (error) throw error;
     const posts = data || [];
     if (!currentUser || !posts.length) return posts;
 
     const [bookmarks, comments, views] = await Promise.all([
-      db.from('bookmarks').select('post_id').eq('user_id', currentUser.id),
-      db.from('comments').select('post_id').eq('user_id', currentUser.id).limit(200),
-      db.from('post_views').select('post_id').eq('viewer_id', currentUser.id).limit(300)
+      db.from('bookmarks').select('post_id,created_at').eq('user_id', currentUser.id).order('created_at',{ascending:false}).limit(300),
+      db.from('comments').select('post_id,created_at').eq('user_id', currentUser.id).order('created_at',{ascending:false}).limit(300),
+      db.from('post_views').select('post_id,created_at').eq('viewer_id', currentUser.id).order('created_at',{ascending:false}).limit(400)
     ]);
-    const bookmarkIds = new Set((bookmarks.data || []).map(r => r.post_id));
-    const commentIds = new Set((comments.data || []).map(r => r.post_id));
-    const viewIds = new Set((views.data || []).map(r => r.post_id));
-    const engagedIds = [...new Set([...bookmarkIds, ...commentIds, ...viewIds])];
+    for (const result of [bookmarks, comments, views]) {
+      if (result.error) throw result.error;
+    }
+
+    const bookmarkIds = new Set((bookmarks.data || []).map(row => row.post_id));
+    const commentIds = new Set((comments.data || []).map(row => row.post_id));
+    const viewIds = new Set((views.data || []).map(row => row.post_id));
+    const engagementWeights = new Map();
+    const addWeight = (id, amount) => engagementWeights.set(id, (engagementWeights.get(id) || 0) + amount);
+    (bookmarks.data || []).forEach(row => addWeight(row.post_id, 5));
+    (comments.data || []).forEach(row => addWeight(row.post_id, 4));
+    (views.data || []).forEach(row => addWeight(row.post_id, 1));
+
+    const engagedIds = [...engagementWeights.keys()].slice(0, 300);
     const interestCounts = new Map();
     if (engagedIds.length) {
-      const {data: engagedPosts} = await db.from('posts').select('id,tags').in('id', engagedIds.slice(0, 250));
-      (engagedPosts || []).forEach(post => (post.tags || []).forEach(tag => interestCounts.set(tag, (interestCounts.get(tag) || 0) + (bookmarkIds.has(post.id) ? 4 : commentIds.has(post.id) ? 3 : 1))));
+      const {data: engagedPosts, error: interestError} = await db.from('posts')
+        .select('id,tags').in('id', engagedIds);
+      if (interestError) throw interestError;
+      (engagedPosts || []).forEach(post => {
+        const weight = engagementWeights.get(post.id) || 1;
+        (post.tags || []).forEach(rawTag => {
+          const tag = String(rawTag).trim().toLowerCase().replace(/^#/, '');
+          if (tag) interestCounts.set(tag, (interestCounts.get(tag) || 0) + weight);
+        });
+      });
     }
-    const city = (myProfile?.city || '').toLowerCase().trim();
-    const region = (myProfile?.region || '').toLowerCase().trim();
+
+    const city = String(myProfile?.city || '').toLowerCase().trim();
+    const region = String(myProfile?.region || '').toLowerCase().trim();
     const now = Date.now();
-    return posts.map(post => {
-      let score = 0;
-      if (city && post.location_city?.toLowerCase().trim() === city) score += 26;
-      if (region && post.location_region?.toLowerCase().trim() === region) score += 13;
-      (post.tags || []).forEach(tag => { score += Math.min(16, (interestCounts.get(tag) || 0) * 2); });
-      if (bookmarkIds.has(post.id)) score += 4;
-      if (commentIds.has(post.id)) score += 3;
+    const scored = posts.map(post => {
       const ageHours = Math.max(0, (now - new Date(post.created_at).getTime()) / 3600000);
-      score += Math.max(0, 9 - ageHours / 10);
-      return {...post, _loopScore:score};
-    }).sort((a,b) => b._loopScore - a._loopScore || new Date(b.created_at) - new Date(a.created_at));
+      const tags = [...new Set((post.tags || []).map(rawTag => String(rawTag).trim().toLowerCase().replace(/^#/, '')).filter(Boolean))];
+      const tagScores = tags.map(tag => ({tag, score: Math.min(8, Math.log2(1 + (interestCounts.get(tag) || 0)) * 2.7)}))
+        .sort((a,b) => b.score - a.score);
+      const interestScore = Math.min(18, tagScores.slice(0, 3).reduce((sum, item) => sum + item.score, 0));
+      const cityMatch = city && String(post.location_city || '').toLowerCase().trim() === city;
+      const regionMatch = region && String(post.location_region || '').toLowerCase().trim() === region;
+      // A smooth 36-hour decay keeps new posts visible without immediately
+      // burying older posts that strongly match someone's interests.
+      const freshnessScore = 24 * Math.exp(-ageHours / 36);
+      const locationScore = (cityMatch ? 13 : 0) + (!cityMatch && regionMatch ? 7 : 0);
+      const repeatPenalty = (viewIds.has(post.id) ? 4 : 0) + (bookmarkIds.has(post.id) ? 3 : 0) + (commentIds.has(post.id) ? 1.5 : 0);
+      const explorationBonus = interestCounts.size && tags.length && !tagScores.some(item => item.score > 0) ? 2 : 0;
+      const score = freshnessScore + locationScore + interestScore + explorationBonus - repeatPenalty;
+      const primaryTag = tagScores[0]?.tag || tags[0] || '__untagged__';
+      return {...post, _loopScore:score, _loopTopic:primaryTag};
+    });
+
+    return diversifyFeed(scored);
+  }
+
+  function diversifyFeed(scoredPosts) {
+    const remaining = scoredPosts.slice();
+    const ranked = [];
+    const recentTopics = [];
+    const recentAuthors = [];
+
+    while (remaining.length) {
+      let bestIndex = 0;
+      let bestAdjusted = -Infinity;
+      for (let i = 0; i < remaining.length; i++) {
+        const post = remaining[i];
+        const topic = post._loopTopic || '__untagged__';
+        const authorId = post.user_id || '';
+        let diversityPenalty = 0;
+        if (recentTopics[0] === topic) diversityPenalty += 15;
+        else if (recentTopics.slice(0, 3).includes(topic)) diversityPenalty += 7;
+        if (recentAuthors.slice(0, 2).includes(authorId)) diversityPenalty += 4;
+        const adjusted = (post._loopScore || 0) - diversityPenalty;
+        if (adjusted > bestAdjusted || (adjusted === bestAdjusted && new Date(post.created_at) > new Date(remaining[bestIndex].created_at))) {
+          bestAdjusted = adjusted;
+          bestIndex = i;
+        }
+      }
+      const [chosen] = remaining.splice(bestIndex, 1);
+      ranked.push(chosen);
+      recentTopics.unshift(chosen._loopTopic || '__untagged__');
+      recentAuthors.unshift(chosen.user_id || '');
+      recentTopics.length = Math.min(recentTopics.length, 4);
+      recentAuthors.length = Math.min(recentAuthors.length, 3);
+    }
+    return ranked;
   }
 
   async function renderFeed() {
@@ -369,7 +432,79 @@
     }
   }
 
+  function getFullscreenElement() {
+    return document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement || null;
+  }
+
+  function syncFullscreenPlayerUi() {
+    const activeElement = getFullscreenElement();
+    const players = $$('[data-player]');
+    let fallbackOpen = false;
+    players.forEach(player => {
+      const active = activeElement === player || player.classList.contains('is-fallback-fullscreen');
+      player.classList.toggle('is-fullscreen', active);
+      if (player.classList.contains('is-fallback-fullscreen')) fallbackOpen = true;
+      const button = $('[data-fullscreen]', player);
+      if (button) {
+        button.textContent = active ? '⤡' : '⛶';
+        button.setAttribute('aria-label', active ? 'Exit fullscreen' : 'Enter fullscreen');
+        button.title = active ? 'Exit fullscreen' : 'Enter fullscreen';
+      }
+    });
+    document.body.classList.toggle('loop-fallback-fullscreen-open', fallbackOpen);
+  }
+
+  async function togglePlayerFullscreen(player) {
+    const activeElement = getFullscreenElement();
+    const isNativeFullscreen = activeElement === player;
+    const isFallbackFullscreen = player.classList.contains('is-fallback-fullscreen');
+
+    if (isNativeFullscreen) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+      try {
+        if (exit) await exit.call(document);
+        else player.classList.remove('is-fallback-fullscreen');
+      } catch (error) {
+        // If the browser's fullscreen API rejects the exit request, retain a
+        // visible in-page exit control instead of trapping the viewer.
+        player.classList.remove('is-fallback-fullscreen');
+      }
+      syncFullscreenPlayerUi();
+      return;
+    }
+
+    if (isFallbackFullscreen) {
+      player.classList.remove('is-fallback-fullscreen');
+      syncFullscreenPlayerUi();
+      return;
+    }
+
+    const request = player.requestFullscreen || player.webkitRequestFullscreen || player.mozRequestFullScreen || player.msRequestFullscreen;
+    if (request) {
+      try {
+        await request.call(player);
+      } catch (error) {
+        // A CSS fullscreen fallback still provides a working, reversible
+        // fullscreen toggle on browsers that deny the Fullscreen API.
+        player.classList.add('is-fallback-fullscreen');
+      }
+    } else {
+      player.classList.add('is-fallback-fullscreen');
+    }
+    syncFullscreenPlayerUi();
+  }
+
+  let fullscreenListenersBound = false;
+  function ensureFullscreenListeners() {
+    if (fullscreenListenersBound) return;
+    fullscreenListenersBound = true;
+    ['fullscreenchange','webkitfullscreenchange','mozfullscreenchange','MSFullscreenChange'].forEach(eventName => {
+      document.addEventListener(eventName, syncFullscreenPlayerUi);
+    });
+  }
+
   function bindPlayers(root) {
+    ensureFullscreenListeners();
     $$('[data-player]', root).forEach(player => {
       if (player.dataset.bound === '1') return;
       player.dataset.bound = '1';
@@ -415,11 +550,9 @@
       video.addEventListener('seeked', () => { if (activeVideoView?.postId === player.dataset.postId) activeVideoView.lastTime = video.currentTime; });
       progress?.addEventListener('input', () => { if (Number.isFinite(video.duration)) video.currentTime = Number(progress.value) / 1000 * video.duration; });
       $('[data-mute]', player)?.addEventListener('click', event => { video.muted = !video.muted; event.currentTarget.textContent = video.muted ? '×' : '◖))'; });
-      $('[data-fullscreen]', player)?.addEventListener('click', () => {
-        if (player.requestFullscreen) player.requestFullscreen().catch(() => {});
-        else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen();
-      });
+      $('[data-fullscreen]', player)?.addEventListener('click', () => togglePlayerFullscreen(player));
     });
+    syncFullscreenPlayerUi();
   }
 
   async function renderNotifications() {

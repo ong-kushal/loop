@@ -49,8 +49,22 @@
   };
   const authorLink = profile => `#/profile/${encodeURIComponent(profile?.username || '')}`;
   const setActiveNav = () => {
-    const hash = location.hash || '#/feed';
-    $$('.nav-link').forEach(link => link.classList.toggle('active', hash.startsWith(link.getAttribute('href'))));
+    const hash = location.hash || '';
+    $$('.nav-link').forEach(link => link.classList.toggle('active', Boolean(hash) && hash.startsWith(link.getAttribute('href'))));
+  };
+  const setMeta = (selector, content) => {
+    const element = document.querySelector(selector);
+    if (element) element.setAttribute('content', content);
+  };
+  const updatePageSeo = (title, description, noindex = true) => {
+    document.title = title;
+    setMeta('meta[name="description"]', description);
+    setMeta('meta[name="robots"]', noindex ? 'noindex,follow' : 'index,follow,max-image-preview:large');
+    setMeta('meta[name="googlebot"]', noindex ? 'noindex,follow' : 'index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1');
+    setMeta('meta[property="og:title"]', title);
+    setMeta('meta[property="og:description"]', description);
+    setMeta('meta[name="twitter:title"]', title);
+    setMeta('meta[name="twitter:description"]', description);
   };
   const toast = (message, type = 'info') => {
     const el = document.createElement('div');
@@ -1049,12 +1063,40 @@
 
   async function render() {
     setActiveNav();
-    const hash = location.hash || '#/feed';
+    const hash = location.hash || '';
+    // The root URL is a real, static, search-friendly landing page. The app feed
+    // lives at #/feed; authenticated and user-generated views are noindex by default.
+    if (!hash) {
+      activeChatPeer = null;
+      if (photoViewTimer) { clearTimeout(photoViewTimer); photoViewTimer = null; }
+      photoViewPostId = null;
+      activeVideoView = null;
+      updatePageSeo('Loop — A calmer social app for photos & short videos',
+        'Loop is a calmer social app for sharing photos and short videos, discovering local content, saving moments and having thoughtful conversations — without likes or dislikes.', false);
+      return;
+    }
     const [route, ...parts] = hash.slice(2).split('/');
+    const routeTitles = {
+      feed: ['For You | Loop', 'Discover photos and short videos in a calmer, interest-aware social feed.'],
+      saved: ['Saved posts | Loop', 'Your private collection of bookmarked Loop photos and videos.'],
+      notifications: ['Notifications | Loop', 'Your Loop activity and post interaction notifications.'],
+      messages: ['Inbox | Loop', 'Private conversations on Loop.'],
+      dm: ['Private conversation | Loop', 'A private one-to-one conversation on Loop.'],
+      profile: ['Profile | Loop', 'A Loop member profile and shared moments.'],
+      post: ['Post | Loop', 'A photo or short-video post and its conversation on Loop.'],
+      discover: ['Discover people | Loop', 'Find people and explore profiles on Loop.'],
+      upload: ['Create a post | Loop', 'Share a photo or short video on Loop.'],
+      login: ['Sign in | Loop', 'Sign in to your Loop account.'],
+      register: ['Create an account | Loop', 'Join Loop and start sharing photos and short videos.'],
+      'edit-profile': ['Edit profile | Loop', 'Update your Loop profile.'],
+      'location-setup': ['Location preferences | Loop', 'Set optional city and region preferences for local discovery.']
+    };
+    const [routeTitle, routeDescription] = routeTitles[route] || routeTitles.feed;
+    updatePageSeo(routeTitle, routeDescription, true);
     activeChatPeer = route === 'dm' ? parts[0] : null;
     if (photoViewTimer) { clearTimeout(photoViewTimer); photoViewTimer = null; }
     if (route !== 'post') { photoViewPostId = null; activeVideoView = null; }
-    if (route === 'feed' || !route) return renderFeed();
+    if (route === 'feed') return renderFeed();
     if (route === 'saved') return renderSaved();
     if (route === 'notifications') return renderNotifications();
     if (route === 'messages') return renderMessages();

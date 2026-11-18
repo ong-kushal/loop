@@ -1,48 +1,31 @@
-# Loop
+# Loop — GitHub Pages + Supabase
 
-A minimal, mobile-friendly social app built with **HTML, CSS and vanilla JavaScript**. Supabase provides authentication, the database, file storage and realtime messaging.
+A static, mobile-first social web app built with **HTML, CSS and vanilla JavaScript**. GitHub Pages serves the frontend; Supabase provides authentication, Postgres, storage and realtime messaging. No Python server, Node build step or paid hosting is required for this starter deployment.
 
-## Visit Loop
+## Included features
 
-**Live website:** [Open Loop](https://YOUR-GITHUB-USERNAME.github.io/loop/)
-
-> Replace `YOUR-GITHUB-USERNAME` with the GitHub account that owns the repository. If your repository name is not `loop`, update that part of the URL too.
-
-## Features
-
-- Email and password sign-up and sign-in
-- Minimal user profiles with avatar, display name, bio and city/region
-- Photo and short-video posts
-- Personalized **For You** feed using location, content interests and activity
-- Individual post pages and a custom video player
+- Email/password registration and login through Supabase Auth
+- Minimal profiles with avatar, display name and bio; optional city/region onboarding with browser-assisted detection or manual entry
+- Photo and short-video posts (photos up to 10 MB; videos up to 50 MB and 60 seconds)
+- Compact media feed, custom video player and individual post pages
+- For You ranking using private city/region match signals, tags, bookmarks, comments, viewing activity and recency
 - Bookmarks; no likes or dislikes
-- Comments limited to 100 words, with basic word filtering
-- Delete your own posts
-- View counts: photo views after 3 seconds on a post page; video views after 6 seconds of playback (or after the full clip if it is shorter)
-- One view per signed-in viewer per post; creators' own views are excluded
-- Notifications for post interactions such as comments and bookmarks
-- Private one-to-one direct messages and an inbox with unread indicators
+- Comments limited to 100 words, with a basic client-side blocklist and a database trigger blocklist
+- Delete your own posts; storage ownership is enforced by RLS policies
+- Photo view after 3 seconds on an individual post page
+- Video view after 6 seconds of actual playback, or the full video if shorter than 6 seconds
+- One counted view per signed-in account per post; creators' own views are not counted
+- Notifications for comments, bookmarks and direct messages
+- Inbox and private one-to-one conversations with realtime incoming message updates
+- Supabase Row Level Security policies for profiles, private profile/post locations, posts, comments, bookmarks, views, notifications, messages and storage
 
-## How Loop is hosted
+## 1. Create a Supabase project
 
-- **GitHub Pages** serves the static website.
-- **Supabase** handles sign-in, PostgreSQL data, uploaded media and realtime updates.
-- There is no Python server or build step.
-
-## Setup
-
-### 1. Create a Supabase project
-
-1. Create a project at [supabase.com](https://supabase.com/).
-2. In Supabase, open **SQL Editor → New query**.
-3. Copy the contents of [`supabase/schema.sql`](supabase/schema.sql) into the editor and run it.
-4. Run [`supabase/disable-message-notifications.sql`](supabase/disable-message-notifications.sql) once if you want incoming DMs to appear only in the Inbox, not in the Notifications page.
-
-### 2. Add your Supabase credentials
-
-In **Supabase → Project Settings → API**, copy the Project URL and the publishable key (or legacy `anon` key).
-
-Open [`js/config.js`](js/config.js) and replace the placeholders:
+1. Open <https://supabase.com/> and create a Free project.
+2. Open **SQL Editor → New query**.
+3. Open `supabase/schema.sql` from this repository, copy the entire file into the SQL Editor and run it.
+4. In **Project Settings → API**, copy the Project URL and the **publishable key**. The legacy `anon` key is also accepted by the client.
+5. Open `js/config.js` and replace the two placeholder values:
 
 ```js
 window.LOOP_CONFIG = {
@@ -51,68 +34,98 @@ window.LOOP_CONFIG = {
 };
 ```
 
-Use only the browser-safe publishable/anon key here. **Never put your `service_role` key or another secret key in this repository.**
+Only use the publishable/anon key in browser code. **Never use the `service_role` key or any secret key in this repository.** RLS is the security boundary for browser requests.
 
-### 3. Configure Supabase sign-in URLs
+## 2. Upgrade an existing Supabase project (skip for a brand-new project)
 
-In **Supabase → Authentication → URL Configuration**:
+If you already deployed an earlier Loop version, run `supabase/location-onboarding-migration.sql` in **Supabase → SQL Editor** before publishing this update. It creates private location tables, moves existing locality labels out of the public profile/post fields, and adds the onboarding flags. The migration is safe to re-run.
 
-- Set **Site URL** to your live Loop URL.
-- Add your live Loop URL to **Redirect URLs**.
-- Add your local development URL there too if you test locally.
+For a brand-new project, the latest `supabase/schema.sql` already includes these tables and policies.
 
-For the default repository name `loop`, the GitHub Pages URL is usually:
+## 3. Configure Supabase Auth URLs
 
-```text
-https://YOUR-GITHUB-USERNAME.github.io/loop/
-```
+In **Authentication → URL Configuration**:
 
-### 4. Deploy with GitHub Pages
+- Set **Site URL** to your GitHub Pages URL, for example `https://YOUR_GITHUB_NAME.github.io/loop/`.
+- Add that exact URL to **Redirect URLs**.
+- If you also test locally, add `http://127.0.0.1:5500/**` and/or your local static server URL to Redirect URLs.
 
-1. Put the contents of this project in the root of your GitHub repository. `index.html` and the `.github` folder should be at the repository root.
-2. Push the files to the `main` branch.
-3. In GitHub, open **Settings → Pages** and select **GitHub Actions** as the deployment source.
-4. Open **Actions** and confirm that **Deploy Loop to GitHub Pages** completes successfully.
-5. Visit the live URL shown in the Pages settings or deployment workflow.
+Email confirmation may be enabled by default. With confirmation enabled, users receive a confirmation email before their first sign-in. The signup screen tells them to check their email.
 
-The workflow in [`.github/workflows/pages.yml`](.github/workflows/pages.yml) publishes the repository root. It does not run a backend.
+## 4. Publish to GitHub Pages
 
-## Run locally
+1. Create a GitHub repository named `loop` (public repositories can use GitHub Pages on GitHub Free).
+2. Upload/commit the **contents of this folder** to the repository root. Keep `.github/workflows/pages.yml` included.
+3. Push the default branch named `main`.
+4. In GitHub, open **Settings → Pages** and choose **GitHub Actions** as the build/deployment source.
+5. Open the **Actions** tab and wait for “Deploy Loop to GitHub Pages” to finish.
+6. Your site will be available at `https://YOUR_GITHUB_NAME.github.io/loop/`.
 
-No Python, Node build process or virtual environment is required. Open the folder with VS Code and use the Live Server extension, or use any static file server. For example, if Node.js is already installed:
+The included GitHub Actions workflow publishes the repository root as a static site. It does not run a backend.
+
+## 5. Local testing (optional)
+
+You do not need Python or a virtual environment. In VS Code, use the Live Server extension, or run another static file server. Example if Node.js is already installed:
 
 ```powershell
 npx serve .
 ```
 
-Add the local address shown by the server to Supabase **Authentication → URL Configuration → Redirect URLs**.
+Then add the local URL (for example `http://localhost:3000/**`) under Supabase **Authentication → URL Configuration → Redirect URLs**.
 
-## Project layout
+## Security and behavior notes
+
+- Row Level Security is enabled on all app tables. Users can only edit their own profile, delete their own posts, see their own bookmarks/notifications, and read conversations where they are a sender or recipient.
+- Private message text is never publicly readable. Realtime notifications are scoped by recipient ID and still subject to RLS.
+- The `loop-posts` and `loop-avatars` buckets are public-read so public posts and profile images can load without signed-in sessions. Upload/update/delete operations require the object path to start with the authenticated user's UUID.
+- The publishable/anon key is intentionally visible in browser JavaScript. Never expose a `service_role` or secret key.
+- Location setup is optional. Users can allow browser location detection, enter a city/region manually, or skip. Automatic detection sends the browser's current coordinates to BigDataCloud's client-side reverse-geocoding API; its service may observe the request IP too. Loop stores only city/region labels and never persists coordinates.
+- City/region match data is stored in private `profile_locations` and `post_locations` tables with owner-only RLS. The feed calls a security-definer RPC that returns only city/region match booleans for the signed-in user. Public profile city/region fields remain blank unless the user explicitly enables public display.
+- The comment blocklist is a small editable starter list, not a complete safety/moderation system. Review and extend the pattern in `moderate_loop_comment()` in `supabase/schema.sql` and the matching blocklist in `js/app.js`.
+- View counts only track signed-in accounts and are de-duplicated by a `(post_id, viewer_id)` primary key. Photo views are recorded after 3 seconds on the detail page. Video views use accumulated forward playback deltas and do not count seeking.
+- The client uses Supabase's browser SDK from jsDelivr, and DM/notification live updates use Supabase Realtime. If a CDN or Realtime connection is unavailable, core page loads and manual refresh still work.
+
+## Free-tier constraints
+
+Supabase's Free plan currently includes 500 MB database size, 1 GB file storage and 10 GB combined bandwidth (5 GB cached + 5 GB uncached). Free projects may pause after a week of low activity. GitHub Pages has a published site size limit of 1 GB and a soft bandwidth limit of 100 GB/month. These limits can change; check provider pricing and docs before inviting a large audience.
+
+This is suitable for a small beta, not an unlimited video platform. Compress media and monitor storage/egress.
+
+## Search visibility and SEO
+
+The public website includes a crawlable homepage, separate About, Features, Community Guidelines and Privacy pages, descriptive page titles and meta descriptions, canonical links, social-sharing metadata, structured data, `robots.txt` and an XML sitemap. The GitHub Pages workflow derives and inserts the correct repository URL during deployment.
+
+After deployment, follow `SEO_SETUP.md` to verify the site in Google Search Console and submit `sitemap.xml`. Search indexing and ranking are not guaranteed; publish useful original content and monitor Search Console rather than using keyword stuffing.
+
+The app's current post/profile views use JavaScript hash routes and are not listed in the sitemap. Search engines generally do not treat hash fragments as independent crawlable URLs. A separate clean-URL and pre-rendering upgrade would be needed before indexing individual user posts reliably.
+
+## Project files
 
 ```text
 index.html
-assets/                  # favicon and static assets
-css/                     # stylesheets
-js/
-  config.js              # Supabase URL and public key
-  app.js                 # application UI and interactions
-supabase/
-  schema.sql              # database, triggers, RLS and storage policies
-  disable-message-notifications.sql
-.github/workflows/
-  pages.yml               # GitHub Pages deployment workflow
+css/style.css
+js/config.js       # paste Supabase URL and public key here
+js/app.js          # application routes, UI and interactions
+assets/favicon.svg
+supabase/schema.sql # database, triggers, RLS and storage policies
+.github/workflows/pages.yml
 ```
 
-## Security notes
+## Recommended public hosting: Cloudflare Pages connected to GitHub
 
-- Row Level Security (RLS) protects user data and private conversations. Keep the policies in `supabase/schema.sql` enabled.
-- The browser publishable/anon key is expected to be public; the `service_role` key is not.
-- Public post media and avatars can be viewed without signing in. Upload, update and delete operations are restricted by the storage policies.
-- Location is entered by the user as a city/region. Loop does not request precise GPS location.
-- The comment word filter is a basic starter moderation layer, not a complete content-safety system.
+**For Loop's real login/messaging use case, prefer Cloudflare Pages as the static host and keep GitHub as the source-code repository.** GitHub Pages is a static host, but GitHub's current usage limits say Pages should not be used for sensitive transactions such as sending passwords, and restrict sites primarily providing commercial SaaS. Loop includes password sign-in and private messages, so check those terms before choosing GitHub Pages for a public deployment.
 
-## Free-tier limits
+Cloudflare Pages can deploy directly from a GitHub repository. The static frontend files in this repo are small and fit its Free plan asset limits.
 
-Loop can be run on GitHub Pages and Supabase free plans, subject to each provider's current limits. Supabase free projects have finite database, file-storage and bandwidth allowances and may pause after a period of inactivity. This setup is suitable for a small beta, not an unlimited public video service. Compress uploads and monitor your Supabase usage.
+1. Create a free Cloudflare account at <https://dash.cloudflare.com/>.
+2. Open **Workers & Pages → Create → Pages → Connect to Git**.
+3. Authorize GitHub and select the `loop` repository.
+4. Set the production branch to `main`.
+5. Choose **None** as the framework preset.
+6. Leave the build command empty and set the build output directory to `.` (the repository root).
+7. Click **Save and Deploy**.
+8. In Supabase **Authentication → URL Configuration**, set Site URL and Redirect URL to the Cloudflare `*.pages.dev` address.
 
-Check the providers' current terms and limits before opening the app to a larger audience. GitHub Pages is static hosting and is not a replacement for a dedicated application backend.
+After that, commits pushed to GitHub automatically deploy to Cloudflare Pages. Cloudflare's static Pages assets are served globally and its free plan currently allows up to 500 builds/month, 20,000 files/site and 25 MiB per static asset. Cloudflare advertises its free start without a credit card; check the current signup flow and plan limits before use.
+
+If you choose GitHub Pages for a noncommercial prototype, the included `.github/workflows/pages.yml` publishes the static site. In the repository choose **Settings → Pages → GitHub Actions**.

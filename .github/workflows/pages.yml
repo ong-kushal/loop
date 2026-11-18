@@ -23,12 +23,36 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Configure Pages
         uses: actions/configure-pages@v5
+
+      - name: Prepare static site and SEO URLs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p _site
+          cp index.html about.html features.html community-guidelines.html privacy.html robots.txt sitemap.xml _site/
+          cp -R css js assets _site/
+
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          if [[ "$REPO" == "$OWNER.github.io" ]]; then
+            SITE_URL="https://${OWNER}.github.io/"
+          else
+            SITE_URL="https://${OWNER}.github.io/${REPO}/"
+          fi
+
+          for file in _site/index.html _site/about.html _site/features.html _site/community-guidelines.html _site/privacy.html _site/robots.txt _site/sitemap.xml; do
+            sed -i "s|__LOOP_SITE_URL__|${SITE_URL}|g" "$file"
+          done
+          echo "Prepared SEO URLs for ${SITE_URL}"
+
       - name: Upload static website files
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: _site
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

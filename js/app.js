@@ -133,7 +133,7 @@
       return;
     }
     const [notifs, messages] = await Promise.all([
-      db.from('notifications').select('id', {count:'exact', head:true}).eq('recipient_id', currentUser.id).eq('is_read', false),
+      db.from('notifications').select('id', {count:'exact', head:true}).eq('recipient_id', currentUser.id).eq('is_read', false).neq('type', 'message'),
       db.from('messages').select('id', {count:'exact', head:true}).eq('recipient_id', currentUser.id).is('read_at', null)
     ]);
     setBadge(notificationBadge, notifs.count || 0);
@@ -152,14 +152,13 @@
     const noticeChannel = db.channel(`loop-notifications-${currentUser.id}`)
       .on('postgres_changes', {event:'INSERT', schema:'public', table:'notifications', filter:`recipient_id=eq.${currentUser.id}`}, payload => {
         updateBadges();
-        if (payload.new.type === 'message') toast('You received a new message.', 'success');
-        else toast('Someone interacted with your post.', 'success');
+        if (payload.new.type !== 'message') toast('Someone interacted with your post.', 'success');
       }).subscribe();
     const messageChannel = db.channel(`loop-messages-${currentUser.id}`)
       .on('postgres_changes', {event:'INSERT', schema:'public', table:'messages', filter:`recipient_id=eq.${currentUser.id}`}, payload => {
+        // New messages are represented by the unread Inbox badge, not a toast or notification.
         updateBadges();
         if (activeChatPeer === payload.new.sender_id) renderChat(activeChatPeer, false);
-        else toast('You received a new message.', 'success');
       }).subscribe();
     realtimeChannels.push(noticeChannel, messageChannel);
   }
@@ -203,8 +202,10 @@
           ${avatarHtml(author)}
           <span class="author-meta"><b>${esc(author.display_name || author.username || 'Loop user')}</b><small>@${esc(author.username || 'user')}${location ? ` · ${esc(location)}` : ''}</small></span>
         </a>
-        <span class="post-kind">${post.media_type === 'video' ? 'VIDEO' : 'PHOTO'}</span>
-        ${isOwn ? '<button class="post-menu" data-action="delete-post" data-id="'+esc(post.id)+'">Delete</button>' : ''}
+        <div class="post-tools">
+          <span class="post-kind">${post.media_type === 'video' ? 'VIDEO' : 'PHOTO'}</span>
+          ${isOwn ? '<button class="post-menu" data-action="delete-post" data-id="'+esc(post.id)+'">Delete</button>' : ''}
+        </div>
       </div>
       <div class="media-stage ${detail ? 'detail-stage' : ''}">${renderMedia(post, detail)}</div>
       <div class="post-content">
@@ -427,7 +428,7 @@
     try {
       const {data, error} = await db.from('notifications')
         .select('*, actor:profiles!notifications_actor_id_fkey(id, username, display_name, avatar_path)')
-        .eq('recipient_id', currentUser.id).order('created_at',{ascending:false}).limit(100);
+        .eq('recipient_id', currentUser.id).neq('type', 'message').order('created_at',{ascending:false}).limit(100);
       if (error) throw error;
       const notifications = data || [];
       const items = notifications.length ? notifications.map(n => {
@@ -435,7 +436,7 @@
         const href = n.type === 'message' ? `#/dm/${actor.id}` : n.post_id ? `#/post/${n.post_id}` : authorLink(actor);
         const label = n.type === 'comment' ? 'commented on your post' : n.type === 'bookmark' ? 'saved your post' : 'sent you a message';
         return `<a class="notification-item ${n.is_read ? '' : 'unread'}" href="${href}" data-notification="${n.id}"><span class="notification-avatar">${avatarHtml(actor,'notification-avatar-inner')}</span><span class="notification-copy"><b>${esc(actor.display_name || actor.username || 'Someone')}</b> ${label}<small>@${esc(actor.username || 'loopuser')}</small><time>${timeAgo(n.created_at)}</time></span><span class="notification-type">${n.type === 'comment' ? '⌁' : n.type === 'bookmark' ? '◇' : '✉'}</span></a>`;
-      }).join('') : emptyState('♧','All quiet here.','When someone comments, saves a post or messages you, you will see it here.');
+      }).join('') : emptyState('♧','All quiet here.','When someone comments on or saves one of your posts, you will see it here. New messages stay in your Inbox.');
       view.innerHTML = `<section class="social-page"><header class="page-heading"><span class="eyebrow">LITTLE MOMENTS OF CONNECTION</span><h1>Your <em>notifications.</em></h1><p>Only meaningful interactions. No alerts for every view.</p>${notifications.some(n => !n.is_read) ? '<button class="quiet-button" data-action="mark-all-read">Mark all as read</button>' : ''}</header><div class="notification-list">${items}</div></section>`;
     } catch (error) { showError(error.message); }
   }
@@ -760,12 +761,18 @@
   }
 
   async function signOut() {
-    const {error} = await db.auth.signOut();
+    // Sign out this browser session only; the same account can remain signed in elsewhere.
+    const {error} = await db.auth.signOut({scope:'local'});
     if (error) throw error;
-    currentUser = null; myProfile = null; activeChatPeer = null;
-    updateUserNav(); updateBadges(); setupRealtime();
+    currentUser = null;
+    myProfile = null;
+    activeChatPeer = null;
+    updateUserNav();
+    await updateBadges();
+    setupRealtime();
     toast('You have signed out.', 'success');
-    location.hash = '#/feed';
+    if (location.hash === '#/feed' || location.hash === '') render();
+    else location.hash = '#/feed';
   }
 
   async function render() {
@@ -789,6 +796,21 @@
     if (route === 'login' || route === 'register') return renderAuth(route);
     return renderFeed();
   }
+
+  // The account controls are outside #view, so they need their own delegated listener.
+  userNav.addEventListener('click', async event => {
+    const signOutButton = event.target.closest('[data-action="signout"]');
+    if (!signOutButton) return;
+    event.preventDefault();
+    if (signOutButton.disabled) return;
+    signOutButton.disabled = true;
+    try {
+      await signOut();
+    } catch (error) {
+      handleError(error, 'Could not sign out. Please try again.');
+      if (signOutButton.isConnected) signOutButton.disabled = false;
+    }
+  });
 
   // Global event delegation keeps navigation and actions working after page changes.
   view.addEventListener('click', async event => {
